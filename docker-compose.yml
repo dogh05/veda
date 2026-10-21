@@ -20,6 +20,10 @@ services:
     build: ./api
     environment:
       DATABASE_URL: postgresql://integrity:${POSTGRES_PASSWORD:-devpassword}@db:5432/integrity
+      HEDERA_NETWORK: ${HEDERA_NETWORK:-testnet}
+      HEDERA_OPERATOR_ID: ${HEDERA_OPERATOR_ID:-}
+      HEDERA_OPERATOR_KEY: ${HEDERA_OPERATOR_KEY:-}
+      HEDERA_MIRROR_URL: ${HEDERA_MIRROR_URL:-https://testnet.mirrornode.hedera.com}
     depends_on:
       db:
         condition: service_healthy
