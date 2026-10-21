@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel
 from psycopg.types.json import Jsonb
 
@@ -17,6 +17,7 @@ from app.core.messages import GENESIS_HASH, build_message, message_hash
 from app.core.payloads import (
     extracted_payload,
     filing_submitted_payload,
+    sealed_payload,
     validated_payload,
 )
 from app.db import connect, register_topic
@@ -26,6 +27,8 @@ from app.hedera import mirror
 from app.hedera.client import HederaService
 from app.ratios import compute_ratios, ratios_digest
 from app.rebuild import sync_consensus
+from app.report import build_report, report_filename, report_sha256
+from app.sealing import build_hfs_metadata, hfs_bytes
 from app.validation import extraction_digest, validate
 from app.verifier import verify_filing, verify_messages
 
@@ -217,6 +220,89 @@ def _prior_values(conn, issuer: str, year: int) -> dict[str, float]:
     return {row[0]: float(row[1]) for row in rows}
 
 
+def _filing_record(conn, filing_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT id, issuer, period, sector, unit, consolidation, status, "
+        "doc_sha256, topic_id, token_id, serial FROM filings WHERE id = %s",
+        (filing_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": str(row[0]),
+        "issuer": row[1],
+        "period": row[2],
+        "sector": row[3],
+        "unit": row[4],
+        "consolidation": row[5],
+        "status": row[6],
+        "doc_sha256": row[7],
+        "topic_id": row[8],
+        "token_id": row[9],
+        "serial": row[10],
+    }
+
+
+def _event_payload(conn, filing_id: str, event: str) -> dict | None:
+    row = conn.execute(
+        "SELECT payload FROM events WHERE filing_id = %s AND event = %s "
+        "ORDER BY hcs_sequence DESC LIMIT 1",
+        (filing_id, event),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _filing_values(conn, filing_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT line_item, label_raw, value, page, confidence FROM values "
+        "WHERE filing_id = %s ORDER BY line_item",
+        (filing_id,),
+    ).fetchall()
+    return [
+        {
+            "line_item": row[0],
+            "label_raw": row[1],
+            "value": int(row[2]),
+            "page": row[3],
+            "confidence": float(row[4]),
+        }
+        for row in rows
+    ]
+
+
+def _filing_ratios(conn, filing_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT code, name, year, value, formula_version FROM ratios "
+        "WHERE filing_id = %s ORDER BY code",
+        (filing_id,),
+    ).fetchall()
+    return [
+        {
+            "code": row[0],
+            "name": row[1],
+            "year": row[2],
+            "value": None if row[3] is None else float(row[3]),
+            "formula_version": row[4],
+        }
+        for row in rows
+    ]
+
+
+def _nft_token(conn, hedera: HederaService) -> str:
+    row = conn.execute(
+        "SELECT value FROM _meta WHERE key = 'nft_token'"
+    ).fetchone()
+    if row:
+        return row[0]
+    token_id = hedera.create_nft_collection()
+    conn.execute(
+        "INSERT INTO _meta (key, value) VALUES ('nft_token', %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (token_id,),
+    )
+    return token_id
+
+
 @router.post("/{filing_id}/extract")
 def extract_filing(
     filing_id: str,
@@ -385,6 +471,144 @@ def extract_filing(
     }
 
 
+@router.post("/{filing_id}/seal")
+def seal_filing(
+    filing_id: str,
+    user: dict = Depends(require_roles("issuer", "admin")),
+) -> dict:
+    with connect() as conn:
+        filing = _filing_record(conn, filing_id)
+        if filing is None:
+            raise HTTPException(404, "Filing not found")
+        if filing["status"] != "validated":
+            raise HTTPException(409, "Filing must be validated before sealing")
+        if not filing["topic_id"]:
+            raise HTTPException(409, "Filing is not anchored on Hedera")
+        duplicate = conn.execute(
+            "SELECT id FROM filings WHERE issuer = %s AND period = %s "
+            "AND status = 'sealed' AND id <> %s",
+            (filing["issuer"], filing["period"], filing_id),
+        ).fetchone()
+        if duplicate is not None:
+            raise HTTPException(
+                409, "A credential already exists for this issuer and period"
+            )
+        values = _filing_values(conn, filing_id)
+        ratios = _filing_ratios(conn, filing_id)
+        extracted = _event_payload(conn, filing_id, "extracted")
+        validated = _event_payload(conn, filing_id, "validated")
+        last = conn.execute(
+            "SELECT hcs_sequence, hash FROM events WHERE filing_id = %s "
+            "ORDER BY hcs_sequence DESC LIMIT 1",
+            (filing_id,),
+        ).fetchone()
+
+    if not values or not ratios:
+        raise HTTPException(409, "Filing has no extracted values")
+    if not extracted or not validated:
+        raise HTTPException(409, "Filing has no validated event")
+    if validated.get("verdict") != "pass":
+        raise HTTPException(409, "Only a passing validation can be sealed")
+    checks = validated.get("checks", [])
+    if not checks or not all(item["status"] == "pass" for item in checks):
+        raise HTTPException(409, "Coherence checks did not pass")
+    if last is None:
+        raise HTTPException(409, "Filing has no events")
+
+    report = build_report(
+        filing=filing,
+        values=values,
+        ratios=ratios,
+        checks=checks,
+        extraction_sha256=extracted["extraction_sha256"],
+        ratios_sha256=validated["ratios_sha256"],
+    )
+    report_hash = report_sha256(report)
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    predicted_sequence = int(last[0]) + 1
+    metadata = build_hfs_metadata(
+        issuer=filing["issuer"],
+        period=filing["period"].isoformat(),
+        sector=filing["sector"],
+        unit=filing["unit"],
+        doc_sha256=filing["doc_sha256"],
+        extraction_sha256=extracted["extraction_sha256"],
+        ratios_sha256=validated["ratios_sha256"],
+        report_sha256=report_hash,
+        verdict=validated["verdict"],
+        topic_id=filing["topic_id"],
+        sequence_range=[1, predicted_sequence],
+        model=extracted.get("model", "deterministic:pymupdf"),
+        created_at=created_at,
+        values=values,
+    )
+    try:
+        contents = hfs_bytes(metadata)
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+    try:
+        hedera = HederaService()
+        with connect() as conn:
+            token_id = _nft_token(conn, hedera)
+        metadata_file_id = hedera.create_file(contents)
+        serial = hedera.mint_nft(token_id, metadata_file_id.encode("utf-8"))
+        payload = sealed_payload(
+            report_sha256=report_hash,
+            token_id=token_id,
+            serial=serial,
+            metadata_file_id=metadata_file_id,
+        )
+        message = build_message(
+            event="sealed",
+            filing_id=filing_id,
+            actor=user["hedera_account_id"],
+            role="agent",
+            sector=filing["sector"],
+            payload=payload,
+            prev_hash=last[1],
+            ts=created_at,
+        )
+        receipt = hedera.submit_message(filing["topic_id"], message)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, "Hedera seal failed") from exc
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO events (id, filing_id, hcs_sequence, event, actor, role, "
+            "payload, prev_hash, hash) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                message["event_id"],
+                filing_id,
+                receipt["sequence"],
+                message["event"],
+                message["actor"],
+                message["role"],
+                Jsonb(message["payload"]),
+                message["prev_hash"],
+                message_hash(message),
+            ),
+        )
+        conn.execute(
+            "UPDATE filings SET status = 'sealed', token_id = %s, serial = %s "
+            "WHERE id = %s",
+            (token_id, serial, filing_id),
+        )
+
+    return {
+        "filing_id": filing_id,
+        "status": "sealed",
+        "token_id": token_id,
+        "serial": serial,
+        "metadata_file_id": metadata_file_id,
+        "report_sha256": report_hash,
+        "hcs_sequence": receipt["sequence"],
+        "hcs_sequence_range": [1, receipt["sequence"]],
+    }
+
+
 @router.get("", response_model=FilingList)
 def list_filings(
     limit: int = Query(50, ge=1, le=200),
@@ -494,6 +718,41 @@ def get_timeline(
             for r in rows
         ]
     }
+
+
+@router.get("/{filing_id}/report.xlsx")
+def download_report(
+    filing_id: str, user: dict = Depends(get_current_user)
+) -> Response:
+    with connect() as conn:
+        filing = _filing_record(conn, filing_id)
+        if filing is None:
+            raise HTTPException(404, "Filing not found")
+        values = _filing_values(conn, filing_id)
+        ratios = _filing_ratios(conn, filing_id)
+        extracted = _event_payload(conn, filing_id, "extracted")
+        validated = _event_payload(conn, filing_id, "validated")
+    if not values or not ratios or not extracted or not validated:
+        raise HTTPException(409, "Filing has not been extracted and validated")
+    data = build_report(
+        filing=filing,
+        values=values,
+        ratios=ratios,
+        checks=validated.get("checks", []),
+        extraction_sha256=extracted["extraction_sha256"],
+        ratios_sha256=validated["ratios_sha256"],
+    )
+    filename = report_filename(filing["issuer"], filing["period"].year)
+    return Response(
+        content=data,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Report-SHA256": report_sha256(data),
+        },
+    )
 
 
 @router.post("/{filing_id}/verify")

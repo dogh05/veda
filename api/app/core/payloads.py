@@ -51,3 +51,20 @@ def validated_payload(
         "verdict": verdict,
         "checks": checks,
     }
+
+
+def sealed_payload(
+    *,
+    report_sha256: str,
+    token_id: str,
+    serial: int,
+    metadata_file_id: str,
+) -> dict:
+    return {
+        "report_sha256": report_sha256,
+        "credential": {
+            "token_id": token_id,
+            "serial": serial,
+            "metadata_file_id": metadata_file_id,
+        },
+    }

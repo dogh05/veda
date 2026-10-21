@@ -1,4 +1,4 @@
-# Contracts — v1.1
+# Contracts — v1.2
 
 Status: **DRAFT for approval**
 This document freezes the interfaces between `api`, `db`, `web`, and Hedera.
@@ -121,7 +121,9 @@ filing_submitted → extracted → validated(pass|fail) → sealed
 - The NFT's metadata field (100-byte cap) contains the **HFS file ID** as bytes,
   e.g. `b"0.0.11118141"`.
 
-HFS file contents (HIP-412-shaped):
+HFS file contents (HIP-412-shaped, max 4096 bytes). `values` is the compact
+line-item list (`k` key, `v` dinar value, `p` page, `c` confidence) used to
+rehydrate the cache after a rebuild:
 
 ```json
 {
@@ -135,11 +137,15 @@ HFS file contents (HIP-412-shaped):
     "doc_sha256": "<hex64>",
     "extraction_sha256": "<hex64>",
     "ratios_sha256": "<hex64>",
+    "report_sha256": "<hex64>",
     "validation_verdict": "pass",
     "hcs_topic_id": "0.0.11118140",
     "hcs_sequence_range": [1, 4],
-    "model": "ollama:qwen2.5:7b-instruct",
-    "created_at": "2026-10-21T18:02:00Z"
+    "model": "deterministic:pymupdf",
+    "created_at": "2026-10-21T18:02:00Z",
+    "values": [
+      { "k": "chiffre_affaires", "v": 983194664, "p": 3, "c": 0.95 }
+    ]
   }
 }
 ```
@@ -160,7 +166,10 @@ Inputs: `topic_id`, `token_id`, `serial`.
 6. `GET /api/v1/tokens/{token_id}/nfts/{serial}` → base64-decode metadata → file ID.
 7. Fetch the HFS file (mirror files endpoint, or SDK `FileContentsQuery`) and parse.
 8. Cross-check: `metadata.properties.doc_sha256` equals the `filing_submitted`
-   payload; `hcs_topic_id` matches; `hcs_sequence_range` covers the events.
+   payload; `extraction_sha256` and `report_sha256` equal the corresponding
+   event payloads; `hcs_topic_id` matches; `hcs_sequence_range` covers the
+   events. Messages larger than 1024 bytes are reassembled from their
+   `chunk_info` before hashing.
 9. Return `{ verified, checks[], evidence }`.
 
 The verifier never trusts our database — only the Mirror Node + on-chain data.
@@ -183,6 +192,7 @@ Base: `/api/v1`. Auth: JWT (HS256), `Authorization: Bearer <token>`.
 |---|---|---|---|
 | POST | `/filings` | issuer | `202 {filing_id, status}` (multipart `file`) |
 | POST | `/filings/{id}/extract` | issuer | `200 {filing_id, status, verdict, line_count, extraction_sha256, ratios_sha256, checks[]}` (multipart `file`, hash must match the filing) |
+| POST | `/filings/{id}/seal` | issuer | `200 {filing_id, status, token_id, serial, metadata_file_id, report_sha256, hcs_sequence, hcs_sequence_range}` |
 | GET | `/filings` | any | `{items:[FilingSummary], total}` |
 | GET | `/filings/{id}` | any | `FilingDetail` (values, ratios, status) |
 | GET | `/filings/{id}/timeline` | any | `{events:[Event]}` |
@@ -290,6 +300,7 @@ CREATE INDEX ON events(filing_id, hcs_sequence);
 |---|---|---|---|---|
 | submit filing | ✓ | – | – | ✓ |
 | extract + validate filing | ✓ | – | – | ✓ |
+| seal filing | ✓ | – | – | ✓ |
 | list/read filings | ✓ | ✓ | ✓ | ✓ |
 | verify from chain | – | ✓ | ✓ | ✓ |
 | export Excel | ✓ | ✓ | ✓ | ✓ |

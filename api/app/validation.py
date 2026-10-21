@@ -7,7 +7,7 @@ TOLERANCE_RATIO = 0.0001
 
 
 def _fmt(value: float) -> str:
-    return f"{value:,.0f}".replace(",", " ")
+    return f"{value:.0f}"
 
 
 def _tolerance(expected: float) -> float:
@@ -31,10 +31,15 @@ def _check(
         }
     difference = actual - expected
     ok = abs(difference) <= _tolerance(expected)
+    detail = (
+        f"{_fmt(actual)}={_fmt(expected)}"
+        if ok
+        else f"{_fmt(actual)} vs {_fmt(expected)} (écart {_fmt(difference)})"
+    )
     return {
         "id": check_id,
         "status": "pass" if ok else "fail",
-        "detail": f"{_fmt(actual)} vs {_fmt(expected)} — écart {_fmt(difference)}",
+        "detail": detail,
     }
 
 

@@ -23,12 +23,26 @@ def _get(path: str, attempts: int = 12, delay: float = 1.5):
     raise RuntimeError(f"mirror request failed: {path}: {last_error}")
 
 
-def _fetch_topic(topic_id: str) -> list[dict]:
+def _reassemble(items: list[dict]) -> list[dict]:
+    slots: list[dict] = []
+    groups: dict[str, dict] = {}
+    for item in items:
+        info = item.get("chunk_info")
+        if not info or int(info.get("total", 1)) <= 1:
+            slots.append({"kind": "single", "item": item})
+            continue
+        key = str(info.get("initial_transaction_id") or item.get("transaction_id"))
+        slot = groups.get(key)
+        if slot is None:
+            slot = {"kind": "chunk", "items": [], "total": int(info["total"])}
+            groups[key] = slot
+            slots.append(slot)
+        slot["items"].append(item)
+
     messages: list[dict] = []
-    path = f"/api/v1/topics/{topic_id}/messages?order=asc&limit=100"
-    while path:
-        data = _get(path)
-        for item in data.get("messages", []):
+    for slot in slots:
+        if slot["kind"] == "single":
+            item = slot["item"]
             raw = base64.b64decode(item["message"]).decode("utf-8")
             messages.append(
                 {
@@ -37,8 +51,31 @@ def _fetch_topic(topic_id: str) -> list[dict]:
                     "message": json.loads(raw),
                 }
             )
-        path = data.get("links", {}).get("next")
+            continue
+        if len(slot["items"]) != slot["total"]:
+            continue
+        chunks = sorted(
+            slot["items"], key=lambda item: int(item["chunk_info"]["number"])
+        )
+        raw = b"".join(base64.b64decode(item["message"]) for item in chunks)
+        messages.append(
+            {
+                "consensus_timestamp": chunks[-1].get("consensus_timestamp"),
+                "sequence_number": chunks[0].get("sequence_number"),
+                "message": json.loads(raw.decode("utf-8")),
+            }
+        )
     return messages
+
+
+def _fetch_topic(topic_id: str) -> list[dict]:
+    items: list[dict] = []
+    path = f"/api/v1/topics/{topic_id}/messages?order=asc&limit=100"
+    while path:
+        data = _get(path)
+        items.extend(data.get("messages", []))
+        path = data.get("links", {}).get("next")
+    return _reassemble(items)
 
 
 def topic_messages(

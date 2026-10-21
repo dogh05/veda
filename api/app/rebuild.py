@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 
 from .core.messages import message_hash
 from .db import connect
+from .extraction.registry import CANONICAL
 from .hedera import mirror
+from .hedera.client import HederaService
+from .ratios import compute_ratios
+from .sealing import values_from_metadata
 
 
 def _ts(value: str | None) -> datetime | None:
@@ -65,6 +70,91 @@ def _known_topics(conn) -> dict[str, str]:
     if row:
         known.update(json.loads(row[0]))
     return known
+
+
+def _stored_values(conn, filing_id: str) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT line_item, value FROM values WHERE filing_id = %s",
+        (filing_id,),
+    ).fetchall()
+    return {row[0]: int(row[1]) for row in rows}
+
+
+def _prior_values(conn, issuer: str, year: int) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT v.line_item, v.value FROM values v "
+        "JOIN filings f ON f.id = v.filing_id "
+        "WHERE f.issuer = %s AND EXTRACT(YEAR FROM f.period) = %s",
+        (issuer, year - 1),
+    ).fetchall()
+    return {row[0]: int(row[1]) for row in rows}
+
+
+def _hydrate_sealed() -> tuple[int, int]:
+    with connect() as conn:
+        sealed = conn.execute(
+            "SELECT id, issuer, period, unit, token_id, serial FROM filings "
+            "WHERE status = 'sealed' AND token_id IS NOT NULL AND serial IS NOT NULL"
+        ).fetchall()
+
+    hydrated = 0
+    ratios_written = 0
+    for filing_id, issuer, period, unit, token_id, serial in sealed:
+        try:
+            file_id = mirror.nft_metadata_bytes(token_id, int(serial)).decode("utf-8")
+            metadata = json.loads(
+                HederaService().read_file(file_id).decode("utf-8")
+            )
+            items = values_from_metadata(metadata)
+        except Exception:  # noqa: BLE001 - keep the existing cache on failure
+            continue
+        if not items:
+            continue
+        with connect() as conn:
+            conn.execute("DELETE FROM values WHERE filing_id = %s", (filing_id,))
+            for item in items:
+                conn.execute(
+                    "INSERT INTO values (id, filing_id, line_item, label_raw, "
+                    "value, page, snippet, unit, period, confidence, bbox) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        str(uuid4()),
+                        filing_id,
+                        item["line_item"],
+                        CANONICAL.get(item["line_item"], item["line_item"]),
+                        item["value"],
+                        item["page"],
+                        "Reconstruit depuis le fichier HFS",
+                        item["unit"] or unit,
+                        item["period"] or period.isoformat(),
+                        item["confidence"],
+                        None,
+                    ),
+                )
+        hydrated += 1
+
+        with connect() as conn:
+            values = _stored_values(conn, filing_id)
+            prior = _prior_values(conn, issuer, period.year)
+            rows = compute_ratios(values, period.year, prior)
+            conn.execute("DELETE FROM ratios WHERE filing_id = %s", (filing_id,))
+            for row in rows:
+                conn.execute(
+                    "INSERT INTO ratios (id, filing_id, code, name, year, value, "
+                    "formula_version) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        str(uuid4()),
+                        filing_id,
+                        row["code"],
+                        row["name"],
+                        row["year"],
+                        row["value"],
+                        row["formula_version"],
+                    ),
+                )
+        ratios_written += len(rows)
+
+    return hydrated, ratios_written
 
 
 def rebuild_cache() -> dict:
@@ -150,4 +240,11 @@ def rebuild_cache() -> dict:
             (json.dumps(known),),
         )
 
-    return {"rebuilt": rebuilt, "filings": rebuilt, "events": events_written}
+    sealed_hydrated, ratios_written = _hydrate_sealed()
+    return {
+        "rebuilt": rebuilt,
+        "filings": rebuilt,
+        "events": events_written,
+        "sealed": sealed_hydrated,
+        "ratios": ratios_written,
+    }

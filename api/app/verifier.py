@@ -97,15 +97,26 @@ def verify_filing(topic_id: str, token_id: str, serial: int) -> dict:
             for item in messages
             if item["message"].get("event") == "extracted"
         ]
+        sealed = [
+            item["message"]
+            for item in messages
+            if item["message"].get("event") == "sealed"
+        ]
         doc_ok = bool(submitted) and props.get("doc_sha256") == submitted[0].get(
             "payload", {}
         ).get("doc_sha256")
         ext_ok = bool(extracted) and props.get(
             "extraction_sha256"
         ) == extracted[0].get("payload", {}).get("extraction_sha256")
+        report_ok = bool(sealed) and props.get("report_sha256") == sealed[0].get(
+            "payload", {}
+        ).get("report_sha256")
         checks.append(_check("doc_hash_match", doc_ok, str(props.get("doc_sha256"))))
         checks.append(
             _check("extraction_hash_match", ext_ok, str(props.get("extraction_sha256")))
+        )
+        checks.append(
+            _check("report_hash_match", report_ok, str(props.get("report_sha256")))
         )
         checks.append(
             _check("topic_match", props.get("hcs_topic_id") == topic_id, str(props.get("hcs_topic_id")))
