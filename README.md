@@ -12,6 +12,17 @@ docker compose up --build
 - Web: http://localhost:8080
 - API health: http://localhost:8000/health
 
+## Comptes de démonstration
+
+Mot de passe commun : `demo1234` (comptes de démo, à changer en production).
+
+| email | rôle |
+|---|---|
+| issuer@lilas.tn | issuer |
+| broker@veda.tn | broker |
+| verifier@veda.tn | verifier |
+| admin@veda.tn | admin |
+
 ## Layout
 
 ```
