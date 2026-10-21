@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from app.db import check_db
 from app.routers import auth, filings, system
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 app = FastAPI(title="Veda API", version=VERSION)
 app.add_middleware(

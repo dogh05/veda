@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import date
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -12,11 +14,19 @@ from psycopg.types.json import Jsonb
 from app.auth import get_current_user, require_roles
 from app.core.canonical import sha256_bytes
 from app.core.messages import GENESIS_HASH, build_message, message_hash
-from app.core.payloads import filing_submitted_payload
+from app.core.payloads import (
+    extracted_payload,
+    filing_submitted_payload,
+    validated_payload,
+)
 from app.db import connect, register_topic
+from app.extraction.eval import CORE
+from app.extraction.pdf import extract_values
 from app.hedera import mirror
 from app.hedera.client import HederaService
+from app.ratios import compute_ratios, ratios_digest
 from app.rebuild import sync_consensus
+from app.validation import extraction_digest, validate
 from app.verifier import verify_filing, verify_messages
 
 router = APIRouter(prefix="/filings", tags=["filings"])
@@ -185,6 +195,194 @@ def submit_filing(
         register_topic(conn, filing_id, topic_id)
 
     return {"filing_id": filing_id, "status": "submitted"}
+
+
+def _last_event_hash(conn, filing_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT hash FROM events WHERE filing_id = %s "
+        "ORDER BY hcs_sequence DESC LIMIT 1",
+        (filing_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _prior_values(conn, issuer: str, year: int) -> dict[str, float]:
+    rows = conn.execute(
+        "SELECT v.line_item, v.value FROM values v "
+        "JOIN filings f ON f.id = v.filing_id "
+        "WHERE f.issuer = %s AND EXTRACT(YEAR FROM f.period) = %s "
+        "ORDER BY f.created_at",
+        (issuer, year - 1),
+    ).fetchall()
+    return {row[0]: float(row[1]) for row in rows}
+
+
+@router.post("/{filing_id}/extract")
+def extract_filing(
+    filing_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_roles("issuer", "admin")),
+) -> dict:
+    raw = file.file.read()
+    if not raw:
+        raise HTTPException(422, "Empty file")
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(422, "File too large (max 25 MB)")
+    name = (file.filename or "").lower()
+    if not name.endswith(".pdf") and file.content_type != "application/pdf":
+        raise HTTPException(422, "Only PDF filings are accepted")
+
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT doc_sha256, issuer, period, sector, unit, status, topic_id "
+            "FROM filings WHERE id = %s",
+            (filing_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Filing not found")
+        doc_sha256, issuer, period, sector, unit, current_status, topic_id = row
+        if current_status != "submitted":
+            raise HTTPException(409, "Filing already extracted")
+        if not topic_id:
+            raise HTTPException(409, "Filing is not anchored on Hedera")
+        prev_hash = _last_event_hash(conn, filing_id)
+        if prev_hash is None:
+            raise HTTPException(409, "Filing has no submission event")
+        prior = _prior_values(conn, issuer, period.year)
+
+    if sha256_bytes(raw) != doc_sha256:
+        raise HTTPException(422, "Document hash does not match the filing")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "filing.pdf"
+            path.write_bytes(raw)
+            items = extract_values(path, period.year)
+    except Exception as exc:
+        raise HTTPException(422, "PDF extraction failed") from exc
+
+    values = {item["line_item"]: item["value"] for item in items}
+    missing = [key for key in CORE if key not in values]
+    if missing:
+        raise HTTPException(422, "Extraction incomplete: " + ", ".join(missing))
+
+    ratio_rows = compute_ratios(values, period.year, prior)
+    result = validate(values)
+    extraction_sha = extraction_digest(items)
+    ratios_sha = ratios_digest(ratio_rows)
+    grounded = sum(
+        1 for item in items if item.get("bbox") and item.get("snippet")
+    )
+    extracted = extracted_payload(
+        extraction_sha256=extraction_sha,
+        model="deterministic:pymupdf",
+        line_count=len(items),
+        grounded_verified=grounded,
+        grounded_total=len(items),
+    )
+    validated = validated_payload(
+        extraction_sha256=extraction_sha,
+        ratios_sha256=ratios_sha,
+        verdict=result["verdict"],
+        checks=result["checks"],
+    )
+
+    message_extracted = build_message(
+        event="extracted",
+        filing_id=filing_id,
+        actor=user["hedera_account_id"],
+        role="agent",
+        sector=sector,
+        payload=extracted,
+        prev_hash=prev_hash,
+    )
+    message_validated = build_message(
+        event="validated",
+        filing_id=filing_id,
+        actor=user["hedera_account_id"],
+        role="agent",
+        sector=sector,
+        payload=validated,
+        prev_hash=message_hash(message_extracted),
+    )
+    try:
+        hedera = HederaService()
+        receipt_extracted = hedera.submit_message(topic_id, message_extracted)
+        receipt_validated = hedera.submit_message(topic_id, message_validated)
+    except Exception as exc:
+        raise HTTPException(502, "Hedera submission failed") from exc
+
+    new_status = "validated" if result["verdict"] == "pass" else "failed"
+    with connect() as conn:
+        conn.execute("DELETE FROM values WHERE filing_id = %s", (filing_id,))
+        conn.execute("DELETE FROM ratios WHERE filing_id = %s", (filing_id,))
+        for item in items:
+            conn.execute(
+                "INSERT INTO values (id, filing_id, line_item, label_raw, value, "
+                "page, snippet, unit, period, confidence, bbox) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    str(uuid4()),
+                    filing_id,
+                    item["line_item"],
+                    item["label_raw"],
+                    item["value"],
+                    item["page"],
+                    item["snippet"],
+                    unit,
+                    item["period"],
+                    item["confidence"],
+                    Jsonb(item["bbox"]),
+                ),
+            )
+        for ratio in ratio_rows:
+            conn.execute(
+                "INSERT INTO ratios (id, filing_id, code, name, year, value, "
+                "formula_version) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    str(uuid4()),
+                    filing_id,
+                    ratio["code"],
+                    ratio["name"],
+                    ratio["year"],
+                    ratio["value"],
+                    ratio["formula_version"],
+                ),
+            )
+        conn.execute(
+            "UPDATE filings SET status = %s WHERE id = %s",
+            (new_status, filing_id),
+        )
+        for message, receipt in (
+            (message_extracted, receipt_extracted),
+            (message_validated, receipt_validated),
+        ):
+            conn.execute(
+                "INSERT INTO events (id, filing_id, hcs_sequence, event, actor, "
+                "role, payload, prev_hash, hash) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    message["event_id"],
+                    filing_id,
+                    receipt["sequence"],
+                    message["event"],
+                    message["actor"],
+                    message["role"],
+                    Jsonb(message["payload"]),
+                    message["prev_hash"],
+                    message_hash(message),
+                ),
+            )
+
+    return {
+        "filing_id": filing_id,
+        "status": new_status,
+        "verdict": result["verdict"],
+        "line_count": len(items),
+        "extraction_sha256": extraction_sha,
+        "ratios_sha256": ratios_sha,
+        "checks": result["checks"],
+    }
 
 
 @router.get("", response_model=FilingList)

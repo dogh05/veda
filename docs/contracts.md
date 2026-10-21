@@ -1,4 +1,4 @@
-# Contracts — v1.0
+# Contracts — v1.1
 
 Status: **DRAFT for approval**
 This document freezes the interfaces between `api`, `db`, `web`, and Hedera.
@@ -71,7 +71,7 @@ of the previous message, forming a tamper-evident chain.
 ```json
 {
   "extraction_sha256": "<hex64>",
-  "model": "ollama:qwen2.5:7b-instruct",
+  "model": "deterministic:pymupdf",
   "line_count": 42,
   "grounded_verified": 42,
   "grounded_total": 42
@@ -182,6 +182,7 @@ Base: `/api/v1`. Auth: JWT (HS256), `Authorization: Bearer <token>`.
 | method | path | role | result |
 |---|---|---|---|
 | POST | `/filings` | issuer | `202 {filing_id, status}` (multipart `file`) |
+| POST | `/filings/{id}/extract` | issuer | `200 {filing_id, status, verdict, line_count, extraction_sha256, ratios_sha256, checks[]}` (multipart `file`, hash must match the filing) |
 | GET | `/filings` | any | `{items:[FilingSummary], total}` |
 | GET | `/filings/{id}` | any | `FilingDetail` (values, ratios, status) |
 | GET | `/filings/{id}/timeline` | any | `{events:[Event]}` |
@@ -288,6 +289,7 @@ CREATE INDEX ON events(filing_id, hcs_sequence);
 | action | issuer | broker | verifier | admin |
 |---|---|---|---|---|
 | submit filing | ✓ | – | – | ✓ |
+| extract + validate filing | ✓ | – | – | ✓ |
 | list/read filings | ✓ | ✓ | ✓ | ✓ |
 | verify from chain | – | ✓ | ✓ | ✓ |
 | export Excel | ✓ | ✓ | ✓ | ✓ |
