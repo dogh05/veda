@@ -1,12 +1,16 @@
-"""Veda API — skeleton (Step 3). Health only; Hedera logic arrives in Step 4."""
-import os
+"""Veda API."""
+from __future__ import annotations
 
-import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-VERSION = "0.1.0"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+from app.db import check_db
+from app.routers import auth
+
+VERSION = "0.2.0"
 
 app = FastAPI(title="Veda API", version=VERSION)
 app.add_middleware(
@@ -16,21 +20,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_ERROR_CODES = {
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    422: "invalid_input",
+}
 
-def check_db() -> str:
-    if not DATABASE_URL:
-        return "not_configured"
-    try:
-        with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        return "ok"
-    except Exception:
-        return "error"
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    message = exc.detail if isinstance(exc.detail, str) else "request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": _ERROR_CODES.get(exc.status_code, "internal_error"),
+                "message": message,
+                "details": {},
+            }
+        },
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "invalid_input",
+                "message": "validation failed",
+                "details": jsonable_encoder(exc.errors()),
+            }
+        },
+    )
 
 
 @app.get("/health")
 @app.get("/api/v1/health")
 def health() -> dict:
     return {"status": "ok", "db": check_db(), "version": VERSION}
+
+
+app.include_router(auth.router, prefix="/api/v1")

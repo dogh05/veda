@@ -24,6 +24,8 @@ services:
       HEDERA_OPERATOR_ID: ${HEDERA_OPERATOR_ID:-}
       HEDERA_OPERATOR_KEY: ${HEDERA_OPERATOR_KEY:-}
       HEDERA_MIRROR_URL: ${HEDERA_MIRROR_URL:-https://testnet.mirrornode.hedera.com}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-please-32bytes}
+      JWT_EXPIRES_SECONDS: ${JWT_EXPIRES_SECONDS:-3600}
     depends_on:
       db:
         condition: service_healthy
