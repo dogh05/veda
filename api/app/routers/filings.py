@@ -1,6 +1,7 @@
 """Filings API: submit, list, detail, timeline."""
 from __future__ import annotations
 
+import json
 from datetime import date
 from uuid import uuid4
 
@@ -12,8 +13,11 @@ from app.auth import get_current_user, require_roles
 from app.core.canonical import sha256_bytes
 from app.core.messages import GENESIS_HASH, build_message, message_hash
 from app.core.payloads import filing_submitted_payload
-from app.db import connect
+from app.db import connect, register_topic
+from app.hedera import mirror
 from app.hedera.client import HederaService
+from app.rebuild import sync_consensus
+from app.verifier import verify_filing, verify_messages
 
 router = APIRouter(prefix="/filings", tags=["filings"])
 
@@ -178,6 +182,7 @@ def submit_filing(
                 message_hash(message),
             ),
         )
+        register_topic(conn, filing_id, topic_id)
 
     return {"filing_id": filing_id, "status": "submitted"}
 
@@ -290,4 +295,68 @@ def get_timeline(
             ).model_dump()
             for r in rows
         ]
+    }
+
+
+@router.post("/{filing_id}/verify")
+def verify_filing_route(
+    filing_id: str,
+    user: dict = Depends(require_roles("broker", "verifier", "admin")),
+) -> dict:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT topic_id, token_id, serial FROM filings WHERE id = %s",
+            (filing_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Filing not found")
+    topic_id, token_id, serial = row
+    if not topic_id:
+        raise HTTPException(409, "Filing is not anchored on Hedera")
+
+    try:
+        if token_id and serial is not None:
+            report = verify_filing(topic_id, token_id, int(serial))
+        else:
+            messages = mirror.topic_messages(topic_id, attempts=3, delay=1.0)
+            report = {
+                "verified": False,
+                "checks": verify_messages(messages),
+                "evidence": {
+                    "topic_id": topic_id,
+                    "message_count": len(messages),
+                },
+            }
+        sync_consensus(filing_id, mirror.topic_messages(topic_id, attempts=3, delay=1.0))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, "Hedera verification failed") from exc
+    return report
+
+
+@router.get("/{filing_id}/credential")
+def get_credential(
+    filing_id: str, user: dict = Depends(get_current_user)
+) -> dict:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT token_id, serial FROM filings WHERE id = %s", (filing_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Filing not found")
+    token_id, serial = row
+    if not token_id or serial is None:
+        raise HTTPException(404, "No credential yet (filing not sealed)")
+
+    try:
+        metadata_file_id = mirror.nft_metadata_bytes(token_id, int(serial)).decode("utf-8")
+        metadata = json.loads(
+            HederaService().read_file(metadata_file_id).decode("utf-8")
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, "Hedera credential read failed") from exc
+    return {
+        "token_id": token_id,
+        "serial": int(serial),
+        "metadata_file_id": metadata_file_id,
+        "metadata": metadata,
     }

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.db import check_db
-from app.routers import auth, filings
+from app.routers import auth, filings, system
 
 VERSION = "0.2.0"
 
@@ -70,3 +70,4 @@ def health() -> dict:
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(filings.router, prefix="/api/v1")
+app.include_router(system.router, prefix="/api/v1")

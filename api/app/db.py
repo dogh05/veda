@@ -1,6 +1,7 @@
 """Postgres access. The database is a cache, rebuildable from the chain."""
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 
@@ -26,3 +27,13 @@ def check_db() -> str:
         return "ok"
     except Exception:
         return "error"
+
+def register_topic(conn, filing_id: str, topic_id: str) -> None:
+    row = conn.execute("SELECT value FROM _meta WHERE key = 'topics'").fetchone()
+    known = json.loads(row[0]) if row else {}
+    known[str(filing_id)] = topic_id
+    conn.execute(
+        "INSERT INTO _meta (key, value) VALUES ('topics', %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (json.dumps(known),),
+    )
