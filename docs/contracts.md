@@ -301,8 +301,8 @@ Convention : clés `snake_case` **en français**, groupées par état. Cible de
 l'extraction et entrée du moteur de ratios (aligné sur l'onglet `Saisie` du modèle).
 
 **Compte de résultat**
-`chiffre_affaires`, `autres_produits_exploitation`, `cout_des_ventes`,
-`charges_personnel`, `autres_charges_exploitation`,
+`chiffre_affaires`, `autres_produits_exploitation`, `variation_stocks`,
+`cout_des_ventes`, `charges_personnel`, `autres_charges_exploitation`,
 `dotations_amortissements_provisions`, `resultat_exploitation`,
 `charges_interets`, `autres_produits_financiers`, `produits_placements`,
 `quote_part_resultat_mee`, `autres_gains_pertes`, `resultat_avant_impot`,
