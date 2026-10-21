@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.db import check_db
-from app.routers import auth
+from app.routers import auth, filings
 
 VERSION = "0.2.0"
 
@@ -26,6 +26,7 @@ _ERROR_CODES = {
     404: "not_found",
     409: "conflict",
     422: "invalid_input",
+    502: "hedera_error",
 }
 
 
@@ -68,3 +69,4 @@ def health() -> dict:
 
 
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(filings.router, prefix="/api/v1")
