@@ -13,6 +13,7 @@ from app.auth import (
     JWT_SECRET,
     create_access_token,
     decode_token,
+    hash_password,
     require_roles,
     verify_password,
 )
@@ -29,6 +30,7 @@ def _user(role: str = "admin") -> dict:
         "email": "admin@veda.tn",
         "role": role,
         "hedera_account_id": "0.0.11060814",
+        "display_name": "Test User",
     }
 
 
@@ -50,6 +52,14 @@ def test_demo_password_matches_seeded_hash():
     assert verify_password("demo1234", SEEDED_ISSUER_HASH)
 
 
+def test_hash_password_roundtrip_and_salt():
+    first = hash_password("new-secret")
+    second = hash_password("new-secret")
+    assert first != second
+    assert verify_password("new-secret", first)
+    assert not verify_password("wrong", first)
+
+
 def test_wrong_or_malformed_password_is_rejected():
     assert not verify_password("wrong", SEEDED_ISSUER_HASH)
     assert not verify_password("demo1234", "not-a-hash")
@@ -60,6 +70,7 @@ def test_token_roundtrip():
     payload = decode_token(create_access_token(_user("broker")))
     assert payload["sub"] == _user()["id"]
     assert payload["role"] == "broker"
+    assert payload["display_name"] == "Test User"
 
 
 def test_expired_token_is_rejected():

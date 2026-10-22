@@ -17,6 +17,14 @@ JWT_EXPIRES_SECONDS = int(os.environ.get("JWT_EXPIRES_SECONDS", "3600"))
 _bearer = HTTPBearer(auto_error=False)
 
 
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, 260000
+    )
+    return f"pbkdf2_sha256$260000${salt.hex()}${digest.hex()}"
+
+
 def verify_password(password: str, stored: str) -> bool:
     try:
         algorithm, iterations, salt_hex, digest_hex = stored.split("$")
@@ -40,6 +48,7 @@ def create_access_token(user: dict) -> str:
         "email": user["email"],
         "role": user["role"],
         "hedera_account_id": user["hedera_account_id"],
+        "display_name": user.get("display_name"),
         "iat": now,
         "exp": now + JWT_EXPIRES_SECONDS,
     }
@@ -72,6 +81,7 @@ def get_current_user(
         "email": payload["email"],
         "role": payload["role"],
         "hedera_account_id": payload["hedera_account_id"],
+        "display_name": payload.get("display_name"),
     }
 
 

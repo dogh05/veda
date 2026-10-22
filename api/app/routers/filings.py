@@ -27,7 +27,7 @@ from app.hedera import mirror
 from app.hedera.client import HederaService
 from app.ratios import compute_ratios, ratios_digest
 from app.rebuild import sync_consensus
-from app.report import build_report, report_filename, report_sha256
+from app.report import build_report, preview_report, report_filename, report_sha256
 from app.sealing import build_hfs_metadata, hfs_bytes
 from app.validation import extraction_digest, validate
 from app.verifier import verify_filing, verify_messages
@@ -44,6 +44,7 @@ class FilingSummary(BaseModel):
     sector: str
     status: str
     doc_sha256: str
+    topic_id: str | None = None
     token_id: str | None = None
     serial: int | None = None
     created_at: str
@@ -92,7 +93,7 @@ class FilingList(BaseModel):
     total: int
 
 
-def _summary(row) -> FilingSummary:
+def _summary(row, topic_id=None) -> FilingSummary:
     return FilingSummary(
         id=str(row[0]),
         issuer=row[1],
@@ -100,6 +101,7 @@ def _summary(row) -> FilingSummary:
         sector=row[3],
         status=row[4],
         doc_sha256=row[5],
+        topic_id=topic_id,
         token_id=row[6],
         serial=row[7],
         created_at=row[8].isoformat(),
@@ -620,14 +622,16 @@ def list_filings(
     params: tuple = (issuer,) if issuer else ()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, issuer, period, sector, status, doc_sha256, token_id, serial, created_at "
+            "SELECT id, issuer, period, sector, status, doc_sha256, token_id, serial, created_at, topic_id "
             f"FROM filings {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (*params, limit, offset),
         ).fetchall()
         total = conn.execute(
             f"SELECT count(*) FROM filings {where}", params
         ).fetchone()[0]
-    return FilingList(items=[_summary(row) for row in rows], total=total)
+    return FilingList(
+        items=[_summary(row, row[9]) for row in rows], total=total
+    )
 
 
 @router.get("/{filing_id}", response_model=FilingDetail)
@@ -637,7 +641,7 @@ def get_filing(
     with connect() as conn:
         row = conn.execute(
             "SELECT id, issuer, period, sector, status, doc_sha256, token_id, serial, "
-            "created_at, unit, consolidation FROM filings WHERE id = %s",
+            "created_at, unit, consolidation, topic_id FROM filings WHERE id = %s",
             (filing_id,),
         ).fetchone()
         if row is None:
@@ -655,7 +659,7 @@ def get_filing(
         event_count = conn.execute(
             "SELECT count(*) FROM events WHERE filing_id = %s", (filing_id,)
         ).fetchone()[0]
-    summary = _summary(row)
+    summary = _summary(row, row[11])
     return FilingDetail(
         **summary.model_dump(),
         unit=row[9],
@@ -720,10 +724,7 @@ def get_timeline(
     }
 
 
-@router.get("/{filing_id}/report.xlsx")
-def download_report(
-    filing_id: str, user: dict = Depends(get_current_user)
-) -> Response:
+def _report_bundle(filing_id: str) -> tuple[dict, bytes]:
     with connect() as conn:
         filing = _filing_record(conn, filing_id)
         if filing is None:
@@ -742,6 +743,27 @@ def download_report(
         extraction_sha256=extracted["extraction_sha256"],
         ratios_sha256=validated["ratios_sha256"],
     )
+    return filing, data
+
+
+@router.get("/{filing_id}/report.preview")
+def preview_report_route(
+    filing_id: str, user: dict = Depends(get_current_user)
+) -> dict:
+    filing, data = _report_bundle(filing_id)
+    return {
+        "filename": report_filename(filing["issuer"], filing["period"].year),
+        "sha256": report_sha256(data),
+        "size": len(data),
+        "sheets": preview_report(data),
+    }
+
+
+@router.get("/{filing_id}/report.xlsx")
+def download_report(
+    filing_id: str, user: dict = Depends(get_current_user)
+) -> Response:
+    filing, data = _report_bundle(filing_id)
     filename = report_filename(filing["issuer"], filing["period"].year)
     return Response(
         content=data,

@@ -11,7 +11,12 @@ from openpyxl import load_workbook
 
 from app.extraction.pdf import extract_values
 from app.ratios import compute_ratios
-from app.report import build_report, report_filename, report_sha256
+from app.report import (
+    build_report,
+    preview_report,
+    report_filename,
+    report_sha256,
+)
 from app.validation import validate
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "lilas"
@@ -111,6 +116,20 @@ def test_report_hash_changes_with_values(bundle):
         ratios_sha256=bundle["ratios_sha256"],
     )
     assert report_sha256(data) != report_sha256(_build(bundle))
+
+
+def test_preview_reads_back_sheets(bundle):
+    sheets = preview_report(_build(bundle))
+    assert [sheet["name"] for sheet in sheets] == [
+        "Synthèse",
+        "Postes",
+        "Ratios",
+        "Contrôles",
+    ]
+    postes = next(sheet for sheet in sheets if sheet["name"] == "Postes")
+    assert postes["rows"][0][0] == "Clé"
+    assert len(postes["rows"]) == len(bundle["values"]) + 1
+    assert postes["truncated"] is False
 
 
 def test_filename_is_safe():

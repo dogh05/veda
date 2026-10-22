@@ -4,9 +4,9 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -287,3 +287,35 @@ def _normalize_zip(data: bytes) -> bytes:
 
 def report_sha256(data: bytes) -> str:
     return sha256_bytes(data)
+
+
+def _cell_value(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def preview_report(data: bytes, max_rows: int = 300, max_cols: int = 30) -> list[dict]:
+    """Read the generated workbook back into JSON-friendly sheet rows."""
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        sheets = []
+        for worksheet in workbook.worksheets:
+            rows = []
+            truncated = False
+            for index, row in enumerate(worksheet.iter_rows(values_only=True)):
+                if index >= max_rows:
+                    truncated = True
+                    break
+                values = [_cell_value(value) for value in row[:max_cols]]
+                while values and values[-1] is None:
+                    values.pop()
+                rows.append(values)
+            sheets.append(
+                {"name": worksheet.title, "rows": rows, "truncated": truncated}
+            )
+        return sheets
+    finally:
+        workbook.close()

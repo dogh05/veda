@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from app.db import check_db
 from app.routers import auth, filings, system
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 app = FastAPI(title="Veda API", version=VERSION)
 app.add_middleware(
@@ -21,6 +21,7 @@ app.add_middleware(
 )
 
 _ERROR_CODES = {
+    400: "invalid_input",
     401: "unauthorized",
     403: "forbidden",
     404: "not_found",
