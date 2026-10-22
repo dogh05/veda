@@ -1,22 +1,31 @@
-import { useEffect, useState } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { ProtectedRoute } from "./auth/ProtectedRoute.jsx";
+import { Layout } from "./components/Layout.jsx";
+import { Account } from "./pages/Account.jsx";
+import { Deposits } from "./pages/Deposits.jsx";
+import { FilingDetail } from "./pages/FilingDetail.jsx";
+import { Login } from "./pages/Login.jsx";
+import { NewDeposit } from "./pages/NewDeposit.jsx";
+import { NotFound } from "./pages/NotFound.jsx";
+import { Operations } from "./pages/Operations.jsx";
+import { Verification } from "./pages/Verification.jsx";
 
 export default function App() {
-  const [health, setHealth] = useState("…");
-
-  useEffect(() => {
-    fetch("/api/v1/health")
-      .then((r) => r.json())
-      .then((d) => setHealth(`API ${d.status} · DB ${d.db}`))
-      .catch(() => setHealth("API injoignable"));
-  }, []);
-
   return (
-    <main style={{ fontFamily: "system-ui, sans-serif", padding: "3rem", color: "#111" }}>
-      <h1 style={{ margin: 0 }}>Veda</h1>
-      <p style={{ marginTop: "0.5rem", color: "#333" }}>
-        Dépôts financiers vérifiés — coquille technique.
-      </p>
-      <p style={{ marginTop: "1.5rem", color: "#555" }}>{health}</p>
-    </main>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route element={<ProtectedRoute />}>
+        <Route element={<Layout />}>
+          <Route index element={<Navigate to="/depots" replace />} />
+          <Route path="/depots" element={<Deposits />} />
+          <Route path="/depots/nouveau" element={<NewDeposit />} />
+          <Route path="/depots/:id" element={<FilingDetail />} />
+          <Route path="/verification" element={<Verification />} />
+          <Route path="/operations" element={<Operations />} />
+          <Route path="/compte" element={<Account />} />
+        </Route>
+      </Route>
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   );
 }
