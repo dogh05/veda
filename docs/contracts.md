@@ -1,4 +1,4 @@
-# Contracts — v1.2
+# Contracts — v1.4
 
 Status: **DRAFT for approval**
 This document freezes the interfaces between `api`, `db`, `web`, and Hedera.
@@ -184,8 +184,13 @@ Base: `/api/v1`. Auth: JWT (HS256), `Authorization: Bearer <token>`.
 | method | path | body | result |
 |---|---|---|---|
 | POST | `/auth/login` | `{email, password}` | `{access_token, token_type:"bearer", expires_in, user}` |
+| GET | `/auth/me` | — | `UserOut` |
+| PATCH | `/auth/me` | `{display_name}` | `UserOut` |
+| POST | `/auth/change-password` | `{current_password, new_password}` | `{status:"ok"}` |
 
-`user = {id, email, role, hedera_account_id}`.
+`user = {id, email, role, hedera_account_id, display_name}`. `display_name` is
+optional, 1–80 characters, and only affects presentation. Passwords are hashed
+with PBKDF2-SHA256; changing a password keeps existing JWTs valid until expiry.
 
 ### 4.2 Filings
 | method | path | role | result |
@@ -201,7 +206,10 @@ Base: `/api/v1`. Auth: JWT (HS256), `Authorization: Bearer <token>`.
 | GET | `/filings/{id}/report.xlsx` | any | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
 | POST | `/system/rebuild` | admin | `{rebuilt, filings, events}` |
 
-`FilingSummary = {id, issuer, period, sector, status, doc_sha256, token_id, serial, created_at}`
+`FilingSummary = {id, issuer, period, sector, status, doc_sha256, topic_id, token_id, serial, created_at}`
+
+`topic_id` is nullable and identifies the filing's HCS topic, so clients can
+link a filing to its proof without a second request.
 
 `FilingDetail = FilingSummary + {unit, consolidation, values:[Value], ratios:[Ratio], timeline_count}`
 
@@ -232,6 +240,7 @@ CREATE TABLE users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('issuer','broker','verifier','admin')),
   hedera_account_id TEXT NOT NULL,
+  display_name TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -12,6 +12,19 @@ docker compose up --build
 - Web: http://localhost:8080
 - API health: http://localhost:8000/health
 
+## Interface
+
+- `/login` — connexion et accès démo en un clic (4 rôles).
+- `/depots` — registre, indicateurs et périmètre de chaque rôle.
+- `/depots/:id` — dossier complet : comptes, ratios, preuve HCS, vérification.
+- `/depots/nouveau` — dépôt en trois étapes (soumission, extraction, scellement).
+- `/verification` — file de contrôle indépendante pour analystes et auditeurs.
+- `/operations` — état du système et reconstruction du cache (administrateur).
+- `/compte` — nom affiché, mot de passe, thème clair / sombre / système.
+
+Le thème est mémorisé dans le navigateur. La session JWT est conservée dans
+`sessionStorage` et expire après une heure.
+
 ## Comptes de démonstration
 
 Mot de passe commun : `demo1234` (comptes de démo, à changer en production).
